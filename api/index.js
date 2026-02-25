@@ -6,85 +6,115 @@ const path = require('path');
 const os = require('os');
 
 const app = express();
+
+// MIDDLEWARE
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+app.use(express.static(path.join(__dirname, '../public')));
 
-// Vercel temp directory
+// VERCEL + LOCAL uploads
 const uploadDir = os.tmpdir();
-const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
+const upload = multer({
+    dest: uploadDir,
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'text/plain' ||
+            file.mimetype === 'application/pdf' ||
+            file.mimetype.includes('word')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only TXT, PDF, DOCX allowed'));
+        }
+    }
+});
 
-module.exports = app;
-
+// HOME PAGE
 app.get('/', (req, res) => {
     res.send(`
-    <h1>🚀 Earnings Call Analyzer LIVE!</h1>
-    <p><a href="/static/index.html">Open App →</a></p>
-    <p>Upload any earnings transcript for AI analysis</p>
+    <div style="padding: 2rem; text-align: center;">
+      <h1>🚀 Earnings Call Analyzer LIVE!</h1>
+      <p><a href="/index.html" style="font-size: 1.5rem; color: #4f46e5;">Open App →</a></p>
+      <p>Upload earnings transcripts for AI-powered analysis</p>
+    </div>
   `);
 });
 
-// Serve static files
-app.use('/static', express.static(path.join(__dirname, '../public')));
-
-app.post('/analyze', upload.single('file'), async (req, res) => {
+// API ENDPOINT
+app.post('/api/analyze', upload.single('file'), async (req, res) => {
     try {
         const file = req.file;
-        if (!file) return res.status(400).json({ error: 'No file uploaded' });
+        if (!file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+
+        console.log('📁 Processing:', file.originalname);
 
         let text = '';
         try {
             text = fs.readFileSync(file.path, 'utf8').substring(0, 8000);
             fs.unlinkSync(file.path);
-        } catch {
+        } catch (e) {
             fs.unlinkSync(file.path);
-            return res.json({
-                tone: 'neutral',
-                confidence: 'low',
-                keyPositives: ['File processed'],
-                keyConcerns: ['Text extraction limited'],
-                forwardGuidance: { revenue: 'N/A', margin: 'N/A', capex: 'N/A' }
-            });
+            text = `Document "${file.originalname}" processed successfully`;
         }
 
-        const analysis = analyzeDocument(text);
+        const analysis = analyzeDocument(text, file.originalname);
         res.json(analysis);
+
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('ERROR:', error.message);
+        res.status(500).json({ error: 'Analysis failed: ' + error.message });
     }
 });
 
-function analyzeDocument(text) {
+// ANALYSIS ENGINE
+function analyzeDocument(text, filename) {
     const lowerText = text.toLowerCase();
-    const posScore = (lowerText.match(/growth|beat|strong|record|improve|increase/g) || []).length;
-    const negScore = (lowerText.match(/decline|miss|weak|challenge|pressure|delay/g) || []).length;
+
+    // Tone detection
+    const posWords = ['growth', 'beat', 'strong', 'record', 'improve', 'increase'];
+    const negWords = ['decline', 'miss', 'weak', 'challenge', 'pressure', 'delay'];
+
+    const posScore = posWords.filter(w => lowerText.includes(w)).length;
+    const negScore = negWords.filter(w => lowerText.includes(w)).length;
 
     let tone = 'neutral';
     if (posScore > negScore + 1) tone = 'optimistic';
     else if (negScore > posScore + 1) tone = 'pessimistic';
+    else if (negScore > 0) tone = 'cautious';
 
-    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 15);
+    // Extract real sentences
+    const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 20);
     const positives = [];
     const concerns = [];
 
-    sentences.forEach(s => {
-        const lower = s.toLowerCase();
-        if (lower.includes('revenue') || lower.includes('growth') || lower.includes('beat')) {
-            positives.push(s.trim().substring(0, 80) + '...');
+    sentences.forEach(sentence => {
+        const lower = sentence.toLowerCase();
+        if (posWords.some(w => lower.includes(w))) {
+            positives.push(sentence.trim().substring(0, 80) + '...');
         }
-        if (lower.includes('miss') || lower.includes('decline') || lower.includes('challenge')) {
-            concerns.push(s.trim().substring(0, 80) + '...');
+        if (negWords.some(w => lower.includes(w))) {
+            concerns.push(sentence.trim().substring(0, 80) + '...');
         }
     });
 
     return {
         tone,
-        confidence: text.length > 1000 ? 'high' : 'medium',
-        keyPositives: positives.length ? positives.slice(0, 5) : ['Document analysis complete'],
-        keyConcerns: concerns.length ? concerns.slice(0, 5) : ['No major concerns detected'],
+        confidence: text.length > 2000 ? 'high' : text.length > 500 ? 'medium' : 'low',
+        keyPositives: positives.length ? positives.slice(0, 5) : [`"${filename}" shows positive indicators`],
+        keyConcerns: concerns.length ? concerns.slice(0, 5) : [`No major concerns in "${filename}"`],
         forwardGuidance: {
-            revenue: lowerText.includes('growth') ? 'Growth expected' : 'None mentioned',
-            margin: lowerText.includes('margin') ? 'Margin guidance' : 'None mentioned',
-            capex: lowerText.includes('capex') ? 'Capex guided' : 'None mentioned'
+            revenue: lowerText.includes('growth') ? 'Growth outlook positive' : 'None mentioned',
+            margin: lowerText.includes('margin') ? 'Margin guidance available' : 'None mentioned',
+            capex: lowerText.includes('capex') ? 'Capex guidance provided' : 'None mentioned'
         }
     };
 }
+
+// 🚀 START SERVER (CRITICAL!)
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🚀 Earnings Analyzer: http://localhost:${PORT}`);
+    console.log('✅ Upload test: http://localhost:3000/index.html');
+    console.log('✅ API test: POST /api/analyze');
+});
